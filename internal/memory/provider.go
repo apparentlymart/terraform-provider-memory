@@ -11,26 +11,85 @@ import (
 type Provider struct {
 	tfplugin6.UnimplementedProviderServer
 
-	logger *log.Logger
+	logger          *log.Logger
+	deferralAllowed bool
 }
 
 var _ tfplugin6.ProviderServer = (*Provider)(nil)
 
 func NewProvider(logger *log.Logger) *Provider {
 	return &Provider{
-		logger: logger,
+		logger:          logger,
+		deferralAllowed: false, // might be set in ConfigureProvider
 	}
 }
 
 // ApplyResourceChange implements tfplugin6.ProviderServer.
 func (p *Provider) ApplyResourceChange(ctx context.Context, req *tfplugin6.ApplyResourceChange_Request) (*tfplugin6.ApplyResourceChange_Response, error) {
+	plannedObj, err := memoryValFromProto(req.PlannedState)
+	if err != nil {
+		return &tfplugin6.ApplyResourceChange_Response{
+			Diagnostics: diagnosticsForErr(
+				"Failed to decode planned state value",
+				"Planned state value is invalid", err,
+			),
+		}, nil
+	}
+	if plannedObj.GetAttr("value").IsKnown() {
+		// If the planned value is known then we're not changing the
+		// stored value and so we can just return what we were given.
+		return &tfplugin6.ApplyResourceChange_Response{
+			NewState: req.PriorState,
+		}, nil
+	}
+	// Otherwise, we'll need to take the final new_value from
+	// the configuration.
+	configObj, err := memoryValFromProto(req.Config)
+	if err != nil {
+		return &tfplugin6.ApplyResourceChange_Response{
+			Diagnostics: diagnosticsForErr(
+				"Failed to decode configuration value",
+				"Configuration value is invalid", err,
+			),
+		}, nil
+	}
+	newValue := configObj.GetAttr("new_value")
+	if newValue.IsNull() {
+		// We shouldn't get here because a null new_value should've
+		// caused us to end up in the "planned value is null" branch
+		// above, but we'll tolerate this anyway for robustness since
+		// the rules for write-only attributes are considerably looser
+		// than for other attributes.
+		return &tfplugin6.ApplyResourceChange_Response{
+			NewState: req.PriorState,
+		}, nil
+	}
+
+	// If we get here then we _are_ going to change the stored value,
+	// and so we need to construct the final object to return.
+	newObj := cty.ObjectVal(map[string]cty.Value{
+		"new_value": cty.NullVal(newValue.Type()), // read-only attribute, so always null in response
+		"value":     newValue,
+	})
+	ret, err := memoryValToProto(newObj)
+	if err != nil {
+		return &tfplugin6.ApplyResourceChange_Response{
+			Diagnostics: diagnosticsForErr(
+				"Failed to serialize final state",
+				"Could not serialize the updated state", err,
+			),
+		}, nil
+	}
 	return &tfplugin6.ApplyResourceChange_Response{
-		NewState: req.PlannedState,
+		NewState: ret,
 	}, nil
 }
 
 // ConfigureProvider implements tfplugin6.ProviderServer.
-func (p *Provider) ConfigureProvider(context.Context, *tfplugin6.ConfigureProvider_Request) (*tfplugin6.ConfigureProvider_Response, error) {
+func (p *Provider) ConfigureProvider(ctx context.Context, req *tfplugin6.ConfigureProvider_Request) (*tfplugin6.ConfigureProvider_Response, error) {
+	if req.ClientCapabilities != nil && req.ClientCapabilities.DeferralAllowed {
+		p.deferralAllowed = true
+	}
 	return &tfplugin6.ConfigureProvider_Response{}, nil
 }
 
@@ -96,7 +155,30 @@ func (p *Provider) PlanResourceChange(ctx context.Context, req *tfplugin6.PlanRe
 	}
 	var val cty.Value
 	newValue := configObj.GetAttr("new_value")
-	if !newValue.IsKnown() {
+	if !newValue.IsKnown() && newValue.Range().CouldBeNull() {
+		if !p.deferralAllowed {
+			// Either using an OpenTofu/Terraform release that lacks
+			// deferred actions support or running in a mode where
+			// deferred actions are not allowed.
+			return &tfplugin6.PlanResourceChange_Response{
+				Diagnostics: []*tfplugin6.Diagnostic{
+					{
+						Severity: tfplugin6.Diagnostic_ERROR,
+						Summary:  "New value not yet known",
+						Detail:   "The new_value argument's nullness is based on a result that won't be known until the apply phase, and so \"memory\" cannot determine whether you intend to write to it.\n\nTo avoid this problem, either allow deferral for this plan or exclude this resource from the plan until the new value has been finalized.",
+						Attribute: &tfplugin6.AttributePath{
+							Steps: []*tfplugin6.AttributePath_Step{
+								{
+									Selector: &tfplugin6.AttributePath_Step_AttributeName{
+										AttributeName: "new_value",
+									},
+								},
+							},
+						},
+					},
+				},
+			}, nil
+		}
 		return &tfplugin6.PlanResourceChange_Response{
 			PlannedState: req.ProposedNewState,
 			Deferred: &tfplugin6.Deferred{
@@ -124,11 +206,20 @@ func (p *Provider) PlanResourceChange(ctx context.Context, req *tfplugin6.PlanRe
 			},
 		}, nil
 	}
-	if !newValue.IsNull() {
-		val = newValue
-	} else {
-		val = priorObj.GetAttr("value") // unchanged
+	if newValue.IsNull() {
+		// If there's no new value then we'll just preserve the prior
+		// state verbatim, retaining the previous value.
+		return &tfplugin6.PlanResourceChange_Response{
+			PlannedState: req.PriorState,
+		}, nil
 	}
+	// Because new_value is a write-only attribute, Terraform does not
+	// guarantee it will have the same value during the apply phase
+	// and so we need to report an unknown value here to allow for
+	// the final value to be different.
+	val = cty.DynamicVal
+	// We'll refer to the configuration again during the apply phase
+	// to determine what the final value is.
 	newObj := cty.ObjectVal(map[string]cty.Value{
 		"new_value": cty.NullVal(newValue.Type()), // read-only attribute, so always null in response
 		"value":     val,

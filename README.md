@@ -24,48 +24,46 @@ terraform {
   }
 }
 
-variable "update_password" {
-  type    = bool
-  default = false
-}
+variable "new_password_version" {
+  type    = string
+  default = null
 
-# This is using random_password just because at the time of writing it's
-# the only ephemeral resource type available in the hashicorp/random
-# provider, but this is really just a way to get a random value for
-# the "version" and will not actually be used as a password.
-ephemeral "random_password" "password_version" {
-  count = var.update_password ? 1 : 0
-
-  length = 256
+  description = "Set this to a value different from the password_version output value to force a new password to be generated and stored."
 }
 
 resource "memory" "password_version" {
-  # This awkward expression arranges for the memory to be updated
-  # whenever there's an instance of ephemeral.random_password.password_version,
-  # and set to a sha256 of the randomly-generated string.
-  new_value = one([
-    for p in ephemeral.random_password.password_version : nonsensitive(sha256(p.result))
-  ])
+  # Whenever var.new_password_version has a non-null value,
+  # the "value" attribute will be unknown during the planning
+  # phase and then updated to the new value in the apply phase.
+  #
+  # If var.new_password_version is null then the previous
+  # value of the "value" attribute is retained.
+  new_value = var.new_password_version
 }
 
-# This one _is_ generating a password, as a placeholder for whatever you need
-# to do to get an ephemeral sensitive value to write into the write-only
-# attribute that needs updating.
 ephemeral "random_password" "password" {
-  count = var.update_password ? 1 : 0
+  # We only need to generate a password when we have a new password version,
+  # because otherwise we'll just preserve whatever password was previously
+  # stored.
+  count = var.new_password_version != null
 
   length = 32
 }
 
-# Now you can use the memory in combination with the possibly-generated
-# random password to write a new password into (for example) AWS secrets
-# manager whenever var.update_password is set to true.
 resource "aws_secretsmanager_secret_version" "example" {
   secret_id     = aws_secretsmanager_secret.example.id
 
+  # The following two arguments together ensure that the password gets
+  # updated to a new randonly-selected value when var.new_password_version
+  # is set, or left unchanged when that variable is null.
   secret_string_wo         = one(ephemeral.random_password.password[*].result)
   secret_string_wo_version = memory.password_version.value
 }
-```
 
-(This is still under development and doesn't quite work yet.)
+# This exposes the most recently used password version so that an operator
+# intending to change the password can set var.new_password_version to anything
+# except this value.
+output "password_version" {
+  value = memory.password_version.value
+}
+```
