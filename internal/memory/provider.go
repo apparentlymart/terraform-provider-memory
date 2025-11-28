@@ -35,6 +35,16 @@ func (p *Provider) ApplyResourceChange(ctx context.Context, req *tfplugin6.Apply
 			),
 		}, nil
 	}
+	if plannedObj.IsNull() {
+		// The client is attempting to apply a "destroy" change for this
+		// resource type. Because "memory" is not backed by anything outside
+		// of its own state, all we need to do here is acknowledge that the
+		// state for this object is now null, by echoing back the same null
+		// value that was planned.
+		return &tfplugin6.ApplyResourceChange_Response{
+			NewState: req.PlannedState,
+		}, nil
+	}
 	if plannedObj.GetAttr("value").IsKnown() {
 		// If the planned value is known then we're not changing the
 		// stored value and so we can just return what we were given.
