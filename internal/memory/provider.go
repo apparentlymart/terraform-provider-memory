@@ -46,10 +46,12 @@ func (p *Provider) ApplyResourceChange(ctx context.Context, req *tfplugin6.Apply
 		}, nil
 	}
 	if plannedObj.GetAttr("value").IsKnown() {
-		// If the planned value is known then we're not changing the
-		// stored value and so we can just return what we were given.
+		// A known planned value means nothing is being written: either the
+		// prior state was retained verbatim, or an empty memory is being
+		// created. The planned state is right in both cases; the prior
+		// state would be null on creation.
 		return &tfplugin6.ApplyResourceChange_Response{
-			NewState: req.PriorState,
+			NewState: req.PlannedState,
 		}, nil
 	}
 	// Otherwise, we'll need to take the final new_value from
@@ -197,23 +199,23 @@ func (p *Provider) PlanResourceChange(ctx context.Context, req *tfplugin6.PlanRe
 		}, nil
 	}
 	if priorObj.IsNull() && newValue.IsNull() {
+		// Creating with no value yet: plan an empty memory. A later write
+		// fills it, and a null new_value after that retains it as usual.
+		emptyObj := cty.ObjectVal(map[string]cty.Value{
+			"new_value": cty.NullVal(cty.DynamicPseudoType),
+			"value":     cty.NullVal(cty.DynamicPseudoType),
+		})
+		ret, err := memoryValToProto(emptyObj)
+		if err != nil {
+			return &tfplugin6.PlanResourceChange_Response{
+				Diagnostics: diagnosticsForErr(
+					"Failed to serialize planned new state",
+					"Could not serialize the planned new state", err,
+				),
+			}, nil
+		}
 		return &tfplugin6.PlanResourceChange_Response{
-			Diagnostics: []*tfplugin6.Diagnostic{
-				{
-					Severity: tfplugin6.Diagnostic_ERROR,
-					Summary:  "New value is required during creation",
-					Detail:   "This memory object has not yet been created, so new_value must be set to initialize the memory.",
-					Attribute: &tfplugin6.AttributePath{
-						Steps: []*tfplugin6.AttributePath_Step{
-							{
-								Selector: &tfplugin6.AttributePath_Step_AttributeName{
-									AttributeName: "new_value",
-								},
-							},
-						},
-					},
-				},
-			},
+			PlannedState: ret,
 		}, nil
 	}
 	if newValue.IsNull() {

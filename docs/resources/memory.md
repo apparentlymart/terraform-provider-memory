@@ -34,8 +34,9 @@ output "value" {
 - `new_value`: The new value to write to the memory cell, or `null` to retain
   the previous value.
 
-  This argument is required when a new `memory` instance is being created, to
-  define the initial value of the memory.
+  If `new_value` is null when a new `memory` instance is being created, the
+  memory is created empty: its `value` is null until a later plan sets
+  `new_value`.
 
 ## Attributes
 
@@ -47,7 +48,8 @@ output "value" {
   argument.
 
   If `new_value` is null during the planning phase then `value` is the
-  previously-stored value.
+  previously-stored value, or null for a memory that was created empty and
+  has not been written yet.
 
 ## Practical Example
 
@@ -102,8 +104,9 @@ output "password_version" {
 }
 ```
 
-During initial creation of this configuration, `new_password_version` **must**
-be set to an arbitrary initial value.
+During initial creation of this configuration, set `new_password_version` to an
+arbitrary initial value. If it is left null the memory is created empty, and
+`secret_string_wo_version` stays null until `new_password_version` is first set.
 
 On subsequent plan/apply rounds, leaving `new_password_version` unset will
 leave the stored password unchanged, without the operator needing any knowledge
