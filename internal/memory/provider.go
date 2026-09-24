@@ -223,6 +223,15 @@ func (p *Provider) PlanResourceChange(ctx context.Context, req *tfplugin6.PlanRe
 			PlannedState: req.PriorState,
 		}, nil
 	}
+	// A known new_value equal to what is already stored writes nothing,
+	// so plan no change rather than an update to an unknown value. This
+	// keeps a plan clean for a memory that is fed its value continuously
+	// and only differs when the source actually changes.
+	if !priorObj.IsNull() && newValue.IsWhollyKnown() && newValue.RawEquals(priorObj.GetAttr("value")) {
+		return &tfplugin6.PlanResourceChange_Response{
+			PlannedState: req.PriorState,
+		}, nil
+	}
 	// Because new_value is a write-only attribute, Terraform does not
 	// guarantee it will have the same value during the apply phase
 	// and so we need to report an unknown value here to allow for
