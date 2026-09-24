@@ -116,3 +116,9 @@ password in the Terraform state.
 The `password_version` output value exposes the most recently used password
 version so that an operator intending to reset the password can choose a
 different value to use.
+
+## Repeated writes of an unchanged value
+
+Setting `new_value` to a known value equal to the one already stored plans no
+change, so a memory that is fed its value on every run stays quiet until that
+value actually changes.
